@@ -2,10 +2,6 @@
 
 Model Context Protocol (MCP) server built with Express.js that provides weather data tools.
 
-## One-Click Deploy
-
-Deploy the example using [Vercel](https://vercel.com?utm_source=github&utm_medium=readme):
-
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/git/external?repository-url=https://github.com/vercel-labs/express-mcp&project-name=express-mcp&repository-name=express-mcp)
 
 ### Clone and run locally
