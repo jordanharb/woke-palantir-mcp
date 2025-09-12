@@ -53,9 +53,9 @@ const handler = createMcpHandler(
         const searchTerms = query.toLowerCase().split(' ');
         const results = SAMPLE_DOCUMENTS
           .map(doc => {
-            const titleScore = searchTerms.reduce((score, term) => 
+            const titleScore = searchTerms.reduce((score: number, term: string) => 
               doc.title.toLowerCase().includes(term) ? score + 2 : score, 0);
-            const textScore = searchTerms.reduce((score, term) => 
+            const textScore = searchTerms.reduce((score: number, term: string) => 
               doc.text.toLowerCase().includes(term) ? score + 1 : score, 0);
             return { ...doc, score: titleScore + textScore };
           })
