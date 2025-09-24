@@ -108,3 +108,6 @@ process.on("SIGINT", async () => {
   }
   process.exit(0);
 });
+
+// Export the app for Vercel
+export default app;
