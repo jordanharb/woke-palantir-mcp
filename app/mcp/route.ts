@@ -1,124 +1,301 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 
-const SAMPLE_DOCUMENTS = [
-  {
-    id: "doc_1",
-    title: "Next.js Performance Best Practices",
-    text: "Next.js offers several optimization techniques to improve application performance. Key strategies include: Image optimization using next/image component, automatic code splitting for faster page loads, static site generation (SSG) for pre-rendered pages, server-side rendering (SSR) for dynamic content, and implementing proper caching strategies. The framework also provides built-in analytics and Core Web Vitals monitoring to track performance metrics.",
-    url: "https://nextjs.org/docs/performance"
-  },
-  {
-    id: "doc_2", 
-    title: "React Server Components Guide",
-    text: "React Server Components represent a new paradigm in React development, allowing components to render on the server and stream to the client. This approach reduces bundle size, improves initial page load times, and enables better SEO. Server Components can fetch data directly without client-side API calls, reducing network waterfalls. They work seamlessly with Client Components, which handle interactivity and browser-only features like event handlers and state management.",
-    url: "https://react.dev/blog/2023/03/22/react-labs-what-we-have-been-working-on-march-2023#react-server-components"
-  },
-  {
-    id: "doc_3",
-    title: "TypeScript Advanced Types",
-    text: "TypeScript's advanced type system includes powerful features like conditional types, mapped types, and template literal types. Conditional types allow type selection based on conditions, while mapped types transform existing types by iterating over their properties. Template literal types enable string manipulation at the type level. Utility types like Pick, Omit, and Record provide common type transformations. These features enable creating robust, type-safe APIs and better developer experiences.",
-    url: "https://typescriptlang.org/docs/handbook/2/types-from-types.html"
-  },
-  {
-    id: "doc_4",
-    title: "Vercel Deployment Strategies",
-    text: "Vercel provides multiple deployment strategies for modern web applications. The platform supports automatic deployments from Git repositories, preview deployments for pull requests, and custom domains with SSL certificates. Edge Functions enable serverless computing at the edge for improved performance. The platform also offers analytics, monitoring, and A/B testing capabilities. Integration with popular frameworks like Next.js, Nuxt, and SvelteKit provides optimized deployment experiences.",
-    url: "https://vercel.com/docs/concepts/deployments/overview"
-  },
-  {
-    id: "doc_5",
-    title: "Model Context Protocol (MCP) Specification",
-    text: "The Model Context Protocol (MCP) is an open standard that enables secure connections between AI applications and data sources. MCP allows AI models to access external tools, databases, and APIs while maintaining security and user control. The protocol supports various transport mechanisms including HTTP and WebSocket connections. Key features include tool invocation, resource access, and prompt templates. MCP servers can be built in any language and integrated with different AI platforms.",
-    url: "https://spec.modelcontextprotocol.io/"
+// Helpers are defined locally to avoid cross-file imports failing in some runtimes
+import type { Pool } from "pg";
+
+let pgPool: Pool | null = null;
+async function getPgPool() {
+  if (pgPool) return pgPool;
+  const { Pool } = await import("pg");
+  const { DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD } = process.env;
+  if (!DB_HOST || !DB_PORT || !DB_NAME || !DB_USER || !DB_PASSWORD) {
+    console.warn("DB env vars missing; SQL tool will be disabled.");
   }
-];
+  pgPool = new Pool({
+    host: DB_HOST,
+    port: DB_PORT ? parseInt(DB_PORT, 10) : 5432,
+    database: DB_NAME,
+    user: DB_USER,
+    password: DB_PASSWORD,
+    max: 5,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+  });
+  return pgPool;
+}
+
+type RpcOptions = {
+  url?: string;
+  key?: string;
+  auth?: string;
+};
+
+async function supabaseRpc<T = unknown>(fn: string, body: Record<string, any>, opts?: RpcOptions): Promise<T> {
+  const url = (opts?.url || process.env.CAMPAIGN_FINANCE_SUPABASE_URL || "").replace(/\/$/, "");
+  const key = opts?.key || process.env.CAMPAIGN_FINANCE_SUPABASE_SERVICE_KEY || process.env.CAMPAIGN_FINANCE_SUPABASE_ANON_KEY || "";
+  const auth = opts?.auth || `Bearer ${key}`;
+  if (!url || !key) {
+    throw new Error("Supabase RPC configuration missing: set CAMPAIGN_FINANCE_SUPABASE_URL and a KEY");
+  }
+  const endpoint = `${url}/rest/v1/rpc/${fn}`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: key,
+      Authorization: auth,
+      Prefer: "count=exact",
+    },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Supabase RPC ${fn} failed: ${res.status} ${res.statusText} ${text}`);
+  }
+  return (await res.json()) as T;
+}
+
+async function embedTextToVec(text: string): Promise<number[]> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) {
+    throw new Error("OPENAI_API_KEY not set; cannot embed query_text");
+  }
+  const model = process.env.EMBEDDING_MODEL || "text-embedding-3-small";
+  const res = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({ model, input: text }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Embedding request failed: ${res.status} ${res.statusText} ${t}`);
+  }
+  const json = await res.json();
+  const vec = json?.data?.[0]?.embedding as number[] | undefined;
+  if (!vec || !Array.isArray(vec)) {
+    throw new Error("Invalid embedding response");
+  }
+  return vec;
+}
 
 const handler = createMcpHandler(
   async (server) => {
+    // Custom SQL tool (read-only by default)
     server.tool(
-      "search",
-      "Search for documents using semantic search. This tool searches through the document store to find semantically relevant matches. Returns a list of search results with basic information. Use the fetch tool to get complete document content.",
+      "sql",
+      "Execute a SQL query against the Postgres database. Default is read-only (SELECT-only). Use for custom, ad-hoc lookups strictly when other tools don't fit.",
       {
-        query: z.string().describe("Search query string. Natural language queries work best for semantic search."),
+        query: z.string().describe("SQL statement. Use SELECT unless writes are explicitly allowed."),
+        params: z.array(z.any()).optional().describe("Optional positional parameters, e.g. [$1, $2]."),
+        allowWrite: z
+          .boolean()
+          .optional()
+          .describe("Set true only if writes are permitted by env (SQL_TOOL_ALLOW_WRITE)."),
       },
-      async ({ query }) => {
-        if (!query || !query.trim()) {
-          return {
-            content: [{ type: "text", text: JSON.stringify({ results: [] }, null, 2) }],
-          };
+      async ({ query, params, allowWrite }) => {
+        const pool = await getPgPool();
+        if (!pool) {
+          throw new Error("DB not configured");
         }
-
-        // Simple keyword-based search for demonstration
-        const searchTerms = query.toLowerCase().split(' ');
-        const results = SAMPLE_DOCUMENTS
-          .map(doc => {
-            const titleScore = searchTerms.reduce((score: number, term: string) => 
-              doc.title.toLowerCase().includes(term) ? score + 2 : score, 0);
-            const textScore = searchTerms.reduce((score: number, term: string) => 
-              doc.text.toLowerCase().includes(term) ? score + 1 : score, 0);
-            return { ...doc, score: titleScore + textScore };
-          })
-          .filter(doc => doc.score > 0)
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 5)
-          .map(doc => ({
-            id: doc.id,
-            title: doc.title,
-            text: doc.text.substring(0, 200) + (doc.text.length > 200 ? "..." : ""),
-            url: doc.url
-          }));
-
+        const allowWritesEnv = (process.env.SQL_TOOL_ALLOW_WRITE || "false").toLowerCase() === "true";
+        const isSelect = /^\s*select\b/i.test(query);
+        if (!isSelect && !(allowWrite && allowWritesEnv)) {
+          throw new Error("SQL tool is read-only. Only SELECT is allowed unless SQL_TOOL_ALLOW_WRITE=true and allowWrite=true.");
+        }
+        const { rows, rowCount, fields } = await pool.query(query, params || []);
+        const columns = fields?.map((f: any) => f.name) || [];
         return {
-          content: [{ type: "text", text: JSON.stringify({ results }, null, 2) }],
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ rowCount, columns, rows }, null, 2),
+            },
+          ],
         };
       }
     );
 
+    // Supabase RPC-backed tools (see mcp-adaptation-guide.md)
     server.tool(
-      "fetch",
-      "Retrieve complete document content by ID for detailed analysis and citation. This tool fetches the full document content from the document store. Use this after finding relevant documents with the search tool to get complete information for analysis and proper citation.",
+      "session_window",
+      "Compute a date window around a legislative session.",
       {
-        id: z.string().describe("Document ID from search results (e.g., doc_1, doc_2, etc.)"),
+        p_session_id: z.number().int(),
+        p_days_before: z.number().int().min(0),
+        p_days_after: z.number().int().min(0),
       },
-      async ({ id }) => {
-        if (!id) {
-          throw new Error("Document ID is required");
+      async (args) => {
+        const data = await supabaseRpc("session_window", args);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "find_donors_by_name",
+      "Fuzzy resolve canonical donors by name.",
+      {
+        p_name: z.string(),
+        p_limit: z.number().int().min(1).max(500).optional(),
+      },
+      async (args) => {
+        const data = await supabaseRpc("find_donors_by_name", args);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "recipient_entity_ids_for_legislator",
+      "Map a legislator to recipient committee/entity ids.",
+      {
+        p_legislator_id: z.number().int(),
+      },
+      async (args) => {
+        const data = await supabaseRpc("recipient_entity_ids_for_legislator", args);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "search_donor_totals_window",
+      "Donor totals/themes with rich filters. Provide query_text for automatic embedding, or pass p_query_vec.",
+      {
+        query_text: z.string().optional().describe("Natural language theme to rank by similarity."),
+        p_query_vec: z.array(z.number()).length(1536).nullable().optional(),
+        p_recipient_entity_ids: z.array(z.number().int()).nullable().optional(),
+        p_session_id: z.number().int().nullable().optional(),
+        p_days_before: z.number().int().min(0).default(0),
+        p_days_after: z.number().int().min(0).default(0),
+        p_from: z.string().nullable().optional().describe("YYYY-MM-DD, used if session_id is null"),
+        p_to: z.string().nullable().optional().describe("YYYY-MM-DD, exclusive, used if session_id is null"),
+        p_group_numbers: z.array(z.number().int()).nullable().optional(),
+        p_min_amount: z.number().default(0),
+        p_limit: z.number().int().min(1).max(1000).default(200),
+      },
+      async (args) => {
+        let vec = args.p_query_vec ?? null;
+        if (!vec && args.query_text) {
+          vec = await embedTextToVec(args.query_text);
         }
+        const payload: any = {
+          p_query_vec: vec,
+          p_recipient_entity_ids: args.p_recipient_entity_ids ?? null,
+          p_session_id: args.p_session_id ?? null,
+          p_days_before: args.p_days_before ?? 0,
+          p_days_after: args.p_days_after ?? 0,
+          p_from: args.p_from ?? null,
+          p_to: args.p_to ?? null,
+          p_group_numbers: args.p_group_numbers ?? null,
+          p_min_amount: args.p_min_amount ?? 0,
+          p_limit: args.p_limit ?? 200,
+        };
+        const data = await supabaseRpc("search_donor_totals_window", payload);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
 
-        const document = SAMPLE_DOCUMENTS.find(doc => doc.id === id);
-        
-        if (!document) {
-          throw new Error(`Document with ID '${id}' not found`);
+    server.tool(
+      "search_bills_for_legislator",
+      "Find bills a legislator voted on, ranked by vectors. Provide query_text for automatic embedding or pass p_query_vec.",
+      {
+        query_text: z.string().optional().describe("Natural language theme to embed."),
+        p_query_vec: z.array(z.number()).length(1536).optional(),
+        p_legislator_id: z.number().int(),
+        p_session_id: z.number().int(),
+        p_mode: z.enum(["summary", "full"]).default("summary"),
+        p_limit: z.number().int().min(1).max(200).default(50),
+      },
+      async (args) => {
+        const vec = args.p_query_vec ?? (args.query_text ? await embedTextToVec(args.query_text) : undefined);
+        if (!vec) {
+          throw new Error("Either query_text or p_query_vec is required");
         }
-
-        const result = {
-          id: document.id,
-          title: document.title,
-          text: document.text,
-          url: document.url,
-          metadata: {
-            source: "sample_data",
-            created_at: "2024-01-01T00:00:00Z",
-            updated_at: "2024-01-01T00:00:00Z"
-          }
+        const payload = {
+          p_query_vec: vec,
+          p_legislator_id: args.p_legislator_id,
+          p_session_id: args.p_session_id,
+          p_mode: args.p_mode ?? "summary",
+          p_limit: args.p_limit ?? 50,
         };
+        const data = await supabaseRpc("search_bills_for_legislator", payload);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
 
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    server.tool(
+      "get_bill_text",
+      "Fetch a bill's stored summary/title and full text snapshot.",
+      {
+        p_bill_id: z.number().int(),
+      },
+      async (args) => {
+        const data = await supabaseRpc("get_bill_text", args);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "get_bill_votes",
+      "Detailed roll-call rows for a bill.",
+      { p_bill_id: z.number().int() },
+      async (args) => {
+        const data = await supabaseRpc("get_bill_votes", args);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "get_bill_vote_rollup",
+      "Quick tally of vote positions for a bill.",
+      { p_bill_id: z.number().int() },
+      async (args) => {
+        const data = await supabaseRpc("get_bill_vote_rollup", args);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+    );
+
+    server.tool(
+      "search_rts_by_vector",
+      "Vector search stakeholder positions. Provide query_text for automatic embedding or pass p_query_vec.",
+      {
+        query_text: z.string().optional(),
+        p_query_vec: z.array(z.number()).length(1536).optional(),
+        p_bill_id: z.number().int().nullable().optional(),
+        p_session_id: z.number().int().nullable().optional(),
+        p_limit: z.number().int().min(1).max(200).default(50),
+      },
+      async (args) => {
+        const vec = args.p_query_vec ?? (args.query_text ? await embedTextToVec(args.query_text) : undefined);
+        if (!vec) {
+          throw new Error("Either query_text or p_query_vec is required");
+        }
+        const payload = {
+          p_query_vec: vec,
+          p_bill_id: args.p_bill_id ?? null,
+          p_session_id: args.p_session_id ?? null,
+          p_limit: args.p_limit ?? 50,
         };
+        const data = await supabaseRpc("search_rts_by_vector", payload);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       }
     );
   },
   {
     capabilities: {
       tools: {
-        search: {
-          description: "Search for documents using semantic search",
-        },
-        fetch: {
-          description: "Retrieve complete document content by ID",
-        },
+        sql: { description: "Execute custom SQL (read-only by default)." },
+        session_window: { description: "Compute session date window." },
+        find_donors_by_name: { description: "Fuzzy donor resolution by name." },
+        recipient_entity_ids_for_legislator: { description: "Committees for a legislator." },
+        search_donor_totals_window: { description: "Aggregate donor totals/themes." },
+        search_bills_for_legislator: { description: "Bills a legislator voted on (vector-ranked)." },
+        get_bill_text: { description: "Get bill summary and full text." },
+        get_bill_votes: { description: "Detailed bill vote rows." },
+        get_bill_vote_rollup: { description: "Vote position counts." },
+        search_rts_by_vector: { description: "Vector search RTS positions." },
       },
     },
   },

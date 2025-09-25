@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "pg": "^8.13.1",
     "mcp-handler": "^1.0.2",
     "next": "15.5.2",
     "react": "19.1.0",

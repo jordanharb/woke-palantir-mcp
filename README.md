@@ -58,3 +58,65 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## MCP Database Adaptation
+
+This template is adapted to your Postgres/Supabase dataset and exposes database-backed MCP tools. The demo `search`/`fetch` tools have been replaced with:
+
+- `sql` — execute custom SQL (SELECT-only by default)
+- `session_window` — compute a date window for a legislative session
+- `find_donors_by_name` — fuzzy donor resolution
+- `recipient_entity_ids_for_legislator` — map legislator → recipient committees
+- `search_donor_totals_window` — donor totals/themes with filters (+ optional vector ranking)
+- `search_bills_for_legislator` — vector-ranked bills a legislator voted on
+- `get_bill_text` — bill summary and full text snapshot
+- `get_bill_votes` — detailed roll-call rows
+- `get_bill_vote_rollup` — quick vote counts
+- `search_rts_by_vector` — vector search for RTS positions
+
+### Automatic Vectorization
+- For vector tools, pass natural language `query_text`. The server will embed it using OpenAI (`OPENAI_API_KEY`, `EMBEDDING_MODEL`) before calling Supabase RPCs. You can still pass `p_query_vec` directly if you already have a 1536-d vector.
+
+### Environment Variables
+Place these in `.env.local` (or your deployment’s secret manager):
+
+```
+# MCP
+MCP_SERVER_PORT=3000
+MCP_SERVER_NAME=woke-palantir-mcp
+
+# Postgres (direct SQL tool)
+DB_HOST=your-host
+DB_PORT=5432
+DB_NAME=postgres
+DB_USER=postgres
+DB_PASSWORD=...
+# Optional: allow writes via sql tool (off by default)
+SQL_TOOL_ALLOW_WRITE=false
+
+# Supabase (RPC tools)
+CAMPAIGN_FINANCE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+# Prefer service key for server runtime
+CAMPAIGN_FINANCE_SUPABASE_SERVICE_KEY=...
+# Or anon key (reduced privileges)
+CAMPAIGN_FINANCE_SUPABASE_ANON_KEY=...
+
+# OpenAI embeddings
+OPENAI_API_KEY=...
+EMBEDDING_MODEL=text-embedding-3-small
+```
+
+### SQL Tool Safety
+- Only SELECT is allowed by default. To enable writes, set `SQL_TOOL_ALLOW_WRITE=true` and pass `allowWrite: true` when invoking the tool. Keep this disabled in production unless absolutely necessary.
+
+### Supabase RPCs
+These tools call your database functions via `POST /rest/v1/rpc/<fn>` using `CAMPAIGN_FINANCE_SUPABASE_URL` and a key. See `mcp-adaptation-guide.md` for function specs, inputs/outputs, and chaining recommendations.
+
+### Running
+- Install deps: `npm install`
+- Dev: `npm run dev`
+- The MCP HTTP endpoint is available at `app/mcp/route.ts` (`/mcp`).
+
+### Notes
+- Ensure your DB has the schema in `schema.md` and the RPCs listed in `mcp-adaptation-guide.md`.
+- If you need additional domain tools, mirror the pattern in `app/mcp/route.ts`.
