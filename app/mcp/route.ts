@@ -1,10 +1,12 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 
-// Helpers are defined locally to avoid cross-file imports failing in some runtimes
-import type { Pool } from "pg";
+// Ensure Node.js runtime (pg not supported on Edge)
+export const runtime = "nodejs";
 
-let pgPool: Pool | null = null;
+// Helpers are defined locally to avoid cross-file imports failing in some runtimes
+
+let pgPool: any | null = null;
 async function getPgPool() {
   if (pgPool) return pgPool;
   const { Pool } = await import("pg");
