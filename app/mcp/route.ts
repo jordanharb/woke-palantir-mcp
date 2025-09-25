@@ -20,6 +20,7 @@ async function getPgPool() {
     database: DB_NAME,
     user: DB_USER,
     password: DB_PASSWORD,
+    ssl: { rejectUnauthorized: false },
     max: 5,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
