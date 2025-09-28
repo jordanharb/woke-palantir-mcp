@@ -10,6 +10,7 @@ This document explains how to use the deployed MCP server at `https://woke-palan
 - **Entry point**: `app/mcp/route.ts` exposes the Streamable HTTP transport at `/mcp`.
 - **Authentication**: None required. OAuth metadata endpoint advertises no auth via `/.well-known/oauth-protected-resource`.
 - **Transport**: Streamable HTTP (SSE disabled for now). Clients should POST to `/mcp` unless enabling SSE manually.
+- **ChatGPT mode**: By default only the compatibility façade tools (`search` and `fetch`) are advertised. Set `EXPOSE_FULL_TOOLSET=true` to expose the full domain toolset to advanced clients.
 - **Verification script**: `node scripts/check.mjs https://woke-palantir-mcp.vercel.app` validates the metadata endpoint and lists registered tools.
 
 ---
@@ -30,6 +31,7 @@ DB_NAME=postgres
 DB_USER=postgres.djzrlccihwqxtjkytcph
 DB_PASSWORD=Fightfest908!
 SQL_TOOL_ALLOW_WRITE=false        # Enable only if writes are intentionally allowed
+EXPOSE_FULL_TOOLSET=false         # Set true to expose the full developer toolset rather than the ChatGPT façade
 
 # Supabase project that hosts the domain RPCs
 CAMPAIGN_FINANCE_SUPABASE_URL=https://ffdrtpknppmtkkbqsvek.supabase.co
@@ -58,7 +60,7 @@ EMBEDDING_MODEL=text-embedding-3-small
 
 ## 4. Tool Catalogue
 
-All tools are registered in `app/mcp/route.ts`. Table below lists names, descriptions, and input schemas.
+All tools are registered in `app/mcp/route.ts`. When `EXPOSE_FULL_TOOLSET=false` the MCP surface exposes only `search`/`fetch` (wrapping the underlying RPCs). Setting the flag to `true` restores the full list below for power users and custom clients.
 
 | Tool | Description | Input Schema |
 |------|-------------|--------------|
@@ -192,4 +194,3 @@ Refer to `mcp-adaptation-guide.md` for the full RPC contract and recommended pro
 - `schema.md` — Legislative and campaign finance schema reference.
 - `.env.local.example` — Environment variable template.
 - `scripts/check.mjs` — Quick verification script for metadata + MCP.
-
